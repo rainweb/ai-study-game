@@ -2,7 +2,8 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#bfe3ff">
 <!-- 不缓存：每次打开都取最新文件（放到网站上时，服务器也应返回同样的 Cache-Control 头） -->
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
@@ -21,7 +22,10 @@
     color: var(--ink); overflow: hidden;
     font-family: ui-rounded, "SF Pro Rounded", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", system-ui, sans-serif;
   }
-  #app { display: flex; flex-direction: column; height: 100vh; }
+  #app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }   /* dvh：手机地址栏伸缩时不被裁掉 */
+  body, #stage, .osk { -webkit-tap-highlight-color: transparent; }
+  #stage, .osk, .topbar { -webkit-user-select: none; user-select: none; }
+  button, .chip, select { touch-action: manipulation; }   /* 防止连点按键时双击放大 */
 
   .topbar {
     display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
@@ -122,6 +126,8 @@
   .missed .en { font-weight: 800; font-size: 18px; }
   .missed .zh { color: var(--muted); flex: 1; }
   .missed button { padding: 4px 10px; }
+  .words-box summary { cursor: pointer; font-weight: 700; padding: 6px 0; }
+  .words-box p.hint { margin: 4px 0 8px; }
   .unit-chips { padding-left: 86px; gap: 6px; }
   .unit-chips .chip { padding: 5px 10px; font-size: 13px; }
   @media (max-width: 560px) { .unit-chips { padding-left: 0; } }
@@ -129,17 +135,74 @@
   #toast { position: absolute; left: 50%; bottom: 120px; transform: translateX(-50%); z-index: 40; background: rgba(34,48,74,.9); color: #fff; padding: 10px 16px; border-radius: 12px; font-size: 14px; opacity: 0; transition: opacity .3s; pointer-events: none; }
   #toast.show { opacity: 1; }
 
+  /* 屏幕键盘：只在触屏设备、游戏进行中显示；接了实体键盘打过字就自动收起 */
+  .osk {
+    display: none; flex-direction: column; gap: 6px; z-index: 30;
+    padding: 8px 4px calc(8px + env(safe-area-inset-bottom)); background: #dfe6f2;
+  }
+  .osk-row { display: flex; justify-content: center; gap: 5px; }
+  .osk-key {
+    flex: 1; max-width: 46px; height: 46px; padding: 0; border-radius: 8px;
+    font: 700 20px ui-rounded, system-ui, sans-serif; box-shadow: 0 2px 0 rgba(30,60,120,.25);
+  }
+  .osk-key.wide { flex: 1.5; max-width: 66px; background: #c7d2e6; font-size: 18px; }
+  .osk-key.down { background: var(--accent); color: #fff; transform: translateY(1px); }
+  @media (pointer: coarse) { #app.is-playing:not(.hw-kbd) .osk { display: flex; } }
+
   @media (max-width: 720px) {
     .tiles { grid-template-columns: repeat(2, 1fr); }
     .tuners input { width: 70px; }
     .card .prompt { font-size: 28px; }
+  }
+
+  /* 手机竖屏 */
+  @media (max-width: 600px) {
+    :root { --ground: 64px; }
+    .topbar { gap: 6px 10px; padding: 8px 12px; padding-top: max(8px, env(safe-area-inset-top)); }
+    .brand { font-size: 18px; }
+    .brand-text { display: none; }
+    .stats { gap: 10px; font-size: 12px; }
+    .stats b { font-size: 15px; }
+    .actions { gap: 6px; }
+    .actions button { padding: 6px 10px; font-size: 14px; }
+    .tuners { order: 5; width: 100%; gap: 14px; font-size: 12px; }
+    .tuners label { flex: 1; min-width: 0; }
+    .tuners input { width: auto; flex: 1; min-width: 0; }
+
+    .cloud { transform: scale(.6); transform-origin: left top; }
+    .card { min-width: 120px; max-width: calc(100vw - 24px); padding: 10px 14px 12px; border-radius: 16px; }
+    .card .prompt { font-size: 24px; }
+    .card .sub { font-size: 12px; }
+    .card .slots { font-size: 21px; gap: 3px; margin-top: 8px; }
+    #praise { font-size: 30px; }
+    #praise.soft { font-size: 20px; }
+    #shooter { width: 48px; margin-left: -24px; bottom: calc(var(--ground) - 16px); }
+    #shooter svg { width: 48px; height: 58px; }
+    #toast { bottom: 76px; width: max-content; max-width: calc(100vw - 32px); }
+
+    .overlay { padding: 10px; align-items: flex-start; }
+    .panel { padding: 16px; border-radius: 18px; }
+    .panel h1 { font-size: 24px; }
+    .panel p.lead { font-size: 14px; margin-bottom: 12px; }
+    /* 悬挂缩进：标签在左，换行后的选项和第一个选项对齐 */
+    .row { gap: 8px; margin-bottom: 10px; padding-left: 72px; }
+    .row > .label { width: 64px; margin-left: -72px; font-size: 15px; }
+    .chip { padding: 6px 10px; font-size: 14px; }
+    select { max-width: 100%; }
+    #voiceSelect { flex: 1 1 140px; min-width: 0; max-width: none !important; }
+    #voiceHint { width: 100%; }
+    textarea { height: 110px; font-size: 16px; }   /* iOS 输入框字号 < 16px 会自动放大页面 */
+    .buttons button { flex: 1; }
+    .tiles b { font-size: 22px; }
+    .missed .en { font-size: 16px; }
+    .kbd-tip { display: none; }
   }
 </style>
 </head>
 <body>
 <div id="app">
   <header class="topbar">
-    <div class="brand">☔ 单词雨</div>
+    <div class="brand">☔ <span class="brand-text">单词雨</span></div>
     <div class="stats">
       <div>得分 <b id="score">0</b></div>
       <div>连击 <b id="combo">0</b></div>
@@ -201,6 +264,12 @@
           <label class="chip"><input type="radio" name="theme" value="classic"> 经典</label>
           <label class="chip"><input type="radio" name="theme" value="shooter"> 射击小人</label>
         </div>
+        <div class="row">
+          <span class="label">发音</span>
+          <select id="voiceSelect" style="max-width:280px"></select>
+          <button id="voiceTestBtn">🔊 试听</button>
+          <span class="hint" id="voiceHint"></span>
+        </div>
         <div class="row" id="bankRow">
           <span class="label">教材</span>
           <select id="bankSelect"></select>
@@ -216,13 +285,15 @@
           </select>
           <span class="hint">掉落速度和语速在顶栏随时调</span>
         </div>
-        <div class="row" style="margin-bottom:6px">
-          <span class="label">词库</span>
-          <span class="hint">每行一个：<kbd>英文 中文</kbd>，如 <kbd>apple 苹果</kbd>、<kbd>living room 客厅</kbd>（中文里带字母就用逗号隔开：<kbd>T-shirt, T恤</kbd>）。共 <b id="wordCount">0</b> 个</span>
-        </div>
-        <textarea id="wordsInput" spellcheck="false"></textarea>
+        <!-- 词库默认折叠，避免占地方；选“自定义”或词库为空时自动展开 -->
+        <details id="wordsBox" class="words-box">
+          <summary>📖 查看 / 编辑词库（共 <b id="wordCount">0</b> 个）</summary>
+          <p class="hint">每行一个：<kbd>英文 中文</kbd>，如 <kbd>apple 苹果</kbd>、<kbd>living room 客厅</kbd>（中文里带字母就用逗号隔开：<kbd>T-shirt, T恤</kbd>）</p>
+          <textarea id="wordsInput" spellcheck="false"></textarea>
+        </details>
         <div class="error" id="menuError"></div>
-        <p class="hint">键盘：字母输入 · <kbd>退格</kbd> 删除 · <kbd>Tab</kbd> 或点卡片再听一遍 · <kbd>Esc</kbd> 暂停</p>
+        <p class="hint kbd-tip">键盘：字母输入 · <kbd>退格</kbd> 删除 · <kbd>Tab</kbd> 或点卡片再听一遍 · <kbd>Esc</kbd> 暂停</p>
+        <p class="hint">手机 / 平板：游戏时下方会出现屏幕键盘，点 🔊 或点卡片再听一遍</p>
         <div class="buttons">
           <button id="resetWordsBtn">恢复默认词库</button>
           <button id="startBtn" class="primary">开始游戏（回车）</button>
@@ -234,7 +305,7 @@
     <section id="pausePanel" class="overlay hidden">
       <div class="panel" style="width:min(360px,100%);text-align:center">
         <h2>⏸ 休息一下</h2>
-        <p class="lead">按 <kbd>Esc</kbd> 继续</p>
+        <p class="lead kbd-tip">按 <kbd>Esc</kbd> 继续</p>
         <div class="buttons" style="justify-content:center">
           <button id="endBtn">结束本局</button>
           <button id="resumeBtn" class="primary">继续</button>
@@ -267,6 +338,7 @@
 
     <div id="toast"></div>
   </main>
+  <div id="osk" class="osk" aria-label="屏幕键盘"></div>
 </div>
 
 <script>
@@ -586,6 +658,7 @@ function loadSettings() {
     words: typeof raw.words === 'string' && raw.words.trim() ? raw.words : DEFAULTS.words,
     bank: typeof raw.bank === 'string' ? raw.bank.slice(0, 10) : '',
     units: Array.isArray(raw.units) ? raw.units.filter((u) => typeof u === 'string').slice(0, 30) : [],
+    voice: typeof raw.voice === 'string' ? raw.voice.slice(0, 300) : '',   // voiceURI，空 = 自动选择
   });
 }
 let settings = loadSettings();
@@ -649,22 +722,41 @@ const Sound = (() => {
 })();
 
 /* ---------- 朗读（speechSynthesis，系统自带英文语音离线可用） ---------- */
+/* macOS 自带的搞怪音效声音，不适合学单词 */
+const NOVELTY_VOICES = /^(Albert|Bad News|Bahh|Bells|Boing|Bubbles|Cellos|Good News|Jester|Organ|Superstar|Trinoids|Whisper|Wobble|Zarvox)\b/i;
+
 const Voice = (() => {
   const synth = window.speechSynthesis;
-  let voice = null;
-  function chooseVoice() {
-    const en = synth.getVoices().filter((v) => /^en/i.test(v.lang));
-    voice = en.find((v) => /en[-_]US/i.test(v.lang) && /Samantha|Google US|Aria|Jenny|Ava/i.test(v.name))
-      || en.find((v) => /en[-_]US/i.test(v.lang)) || en[0] || null;
+  let voices = [];
+  const listeners = [];
+
+  /* 本机英语声音：系统自带（可离线）排前面，再按地区、名字排序 */
+  function load() {
+    voices = synth.getVoices()
+      .filter((v) => /^en/i.test(v.lang) && !NOVELTY_VOICES.test(v.name))
+      .sort((a, b) => Number(b.localService) - Number(a.localService)
+        || a.lang.localeCompare(b.lang) || a.name.localeCompare(b.name));
+    listeners.forEach((cb) => cb(voices));
   }
+  function autoVoice() {
+    return voices.find((v) => /en[-_]US/i.test(v.lang) && /Samantha|Google US|Aria|Jenny|Ava/i.test(v.name))
+      || voices.find((v) => /en[-_]US/i.test(v.lang)) || voices[0] || null;
+  }
+  /* 用户选过且本机还有 → 用它；否则（比如换了设备）退回自动选择 */
+  const currentVoice = () => voices.find((v) => v.voiceURI === settings.voice) || autoVoice();
+
   if (synth) {
-    chooseVoice();
-    synth.addEventListener?.('voiceschanged', chooseVoice);
+    load();
+    synth.addEventListener?.('voiceschanged', load);   // Chrome 的声音列表是异步加载的
+    [300, 1000, 3000].forEach((ms) => setTimeout(() => { if (voices.length === 0) load(); }, ms));  // Safari 有时不触发事件
   }
   return {
+    supported: Boolean(synth),
+    onChange(cb) { listeners.push(cb); cb(voices); },
     speak(text) {
       if (!synth) return;
       synth.cancel();
+      const voice = currentVoice();
       const u = new SpeechSynthesisUtterance(text);
       u.lang = voice ? voice.lang : 'en-US';
       if (voice) u.voice = voice;
@@ -758,6 +850,7 @@ function updateHud() {
   els.combo.textContent = state.combo;
   els.left.textContent = state.queue.length + (state.current?.status === 'falling' ? 1 : 0);
   els.pauseBtn.disabled = !['playing', 'paused'].includes(state.phase);
+  els.app.classList.toggle('is-playing', ['playing', 'paused'].includes(state.phase));
 }
 
 function renderTuners() {
@@ -1083,6 +1176,7 @@ function startFromMenu() {
   const words = parseWords(els.wordsInput.value);
   if (words.length === 0) {
     els.menuError.textContent = '词库是空的：每行写一个“英文 中文”，比如 apple 苹果';
+    $('#wordsBox').open = true;
     return;
   }
   updateSettings({
@@ -1105,6 +1199,7 @@ const bankPicker = window.WordBankPicker.init({
   units: settings.units,
   onPick: ({ bank, units, text }) => {
     bankChoice = { bank, units };
+    if (!bank) $('#wordsBox').open = true;   // 选了“自定义”→ 直接展开让人编辑
     if (text !== null) {
       els.wordsInput.value = text;
       els.wordCount.textContent = parseWords(text).length;
@@ -1117,6 +1212,29 @@ function switchToCustomWords() {
   bankChoice = { bank: '', units: [] };
   bankPicker.reset();
 }
+
+/* 发音选择：列表来自 speechSynthesis.getVoices()，每台设备不同；选择即保存 */
+const voiceSelect = $('#voiceSelect');
+function renderVoiceSelect(voices) {
+  voiceSelect.replaceChildren(
+    new Option('自动选择', ''),
+    ...voices.map((v) => {
+      const name = v.name.replace(/\s*\(.*\)\s*$/, '');   // "Eddy (English (United Kingdom))" → "Eddy"
+      return new Option(`${name}（${v.lang}${v.localService ? '' : '，需联网'}）`, v.voiceURI);
+    }),
+  );
+  voiceSelect.value = voices.some((v) => v.voiceURI === settings.voice) ? settings.voice : '';
+  voiceSelect.disabled = !Voice.supported;
+  $('#voiceTestBtn').disabled = !Voice.supported;
+  $('#voiceHint').textContent = !Voice.supported ? '当前浏览器不支持朗读'
+    : voices.length ? `本机有 ${voices.length} 个英语声音` : '暂未读到英语声音，会用浏览器默认声音';
+}
+Voice.onChange(renderVoiceSelect);
+voiceSelect.addEventListener('change', () => {
+  updateSettings({ voice: voiceSelect.value });
+  Voice.speak('Hello! apple, banana.');
+});
+$('#voiceTestBtn').addEventListener('click', () => Voice.speak('Hello! apple, banana.'));
 
 /* ---------- 事件 ---------- */
 document.addEventListener('keydown', (e) => {
@@ -1131,7 +1249,7 @@ document.addEventListener('keydown', (e) => {
   if (state.phase !== 'playing') return;
   if (e.key === 'Backspace') { e.preventDefault(); backspace(); }
   else if (e.key === 'Tab') { e.preventDefault(); if (state.current) Voice.speak(state.current.word.en); }
-  else if (/^[a-zA-Z]$/.test(e.key)) { e.preventDefault(); typeLetter(e.key); }
+  else if (/^[a-zA-Z]$/.test(e.key)) { e.preventDefault(); els.app.classList.add('hw-kbd'); typeLetter(e.key); }
   else if (e.key === ' ') e.preventDefault();
 });
 
@@ -1165,7 +1283,40 @@ els.missedOnlyBtn.addEventListener('click', () => startRound([...state.missed.va
 $('#backBtn').addEventListener('click', showMenu);
 document.addEventListener('visibilitychange', () => { if (document.hidden) pauseGame(); });
 
+/* ---------- 屏幕键盘（触屏设备） ---------- */
+const OSK_ROWS = ['qwertyuiop', 'asdfghjkl', '🔊zxcvbnm⌫'];
+function buildKeyboard() {
+  const osk = $('#osk');
+  const rows = OSK_ROWS.map((row) => {
+    const div = document.createElement('div');
+    div.className = 'osk-row';
+    div.append(...[...row].map((k) => {
+      const key = Object.assign(document.createElement('button'), { type: 'button', textContent: k });
+      key.className = /[a-z]/.test(k) ? 'osk-key' : 'osk-key wide';
+      key.dataset.key = k;
+      key.setAttribute('aria-label', k === '⌫' ? '删除' : k === '🔊' ? '再听一遍' : k);
+      return key;
+    }));
+    return div;
+  });
+  osk.replaceChildren(...rows);
+  /* 用 pointerdown 而不是 click：响应更快，也不会抢焦点或触发双击放大 */
+  osk.addEventListener('pointerdown', (e) => {
+    const key = e.target.closest('.osk-key');
+    if (!key) return;
+    e.preventDefault();
+    key.classList.add('down');
+    setTimeout(() => key.classList.remove('down'), 120);
+    if (state.phase !== 'playing') return;
+    const k = key.dataset.key;
+    if (k === '⌫') backspace();
+    else if (k === '🔊') { if (state.current) Voice.speak(state.current.word.en); }
+    else typeLetter(k);
+  });
+}
+
 /* ---------- 初始化 ---------- */
+buildKeyboard();
 renderTuners();
 renderMicButton();
 showMenu();
