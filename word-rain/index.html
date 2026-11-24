@@ -48,6 +48,9 @@
   button:hover:not(:disabled) { transform: translateY(-1px); }
   button:disabled { opacity: .45; cursor: not-allowed; }
   button.muted { opacity: .55; }
+  /* 固定宽度：状态文字变化时按钮不变宽变窄，顶栏和游戏区就不会跳 */
+  #micBtn { width: 6.8em; white-space: nowrap; text-align: center; padding-left: 6px; padding-right: 6px; }
+  .stats b { font-variant-numeric: tabular-nums; }   /* 分数变化时数字宽度一致 */
   button.primary { background: var(--accent); color: #fff; font-weight: 700; }
   button.on { background: var(--blue); color: #fff; }
   button.warn { background: #ffe7c2; color: #a35200; animation: nudge 1.2s ease-in-out infinite; }
@@ -902,11 +905,9 @@ const Listener = (() => {
           fail('unknown', e.error);
       }
     };
+    /* 自动续上时界面保持“正在听”，不来回闪“连接中”（只有第一次开启才显示连接中） */
     rec.onend = () => {
-      if (status === 'listening' || status === 'starting') {
-        setStatus('starting');
-        retryTimer = setTimeout(tryStart, 150);
-      }
+      if (status === 'listening' || status === 'starting') retryTimer = setTimeout(tryStart, 150);
     };
   }
 
@@ -995,7 +996,8 @@ function renderTuners() {
   els.rateVal.textContent = `${settings.rate.toFixed(1)}x`;
 }
 
-const MIC_LABELS = { off: '🎤 语音', starting: '🎤 连接中…', listening: '🎤 正在听', blocked: '🎤 点一下继续听' };
+/* 文字长度尽量一致，配合按钮固定宽度，切换状态时顶栏不会跟着变宽变窄 */
+const MIC_LABELS = { off: '🎤 语音', starting: '🎤 连接中', listening: '🎤 正在听', blocked: '🎤 点我继续' };
 
 /* ---------- 语音用不了时：按设备说清楚原因和办法 ---------- */
 const UA = navigator.userAgent;
