@@ -50,11 +50,11 @@
   button.muted { opacity: .55; }
   /* 固定宽度：状态文字变化时按钮不变宽变窄，顶栏和游戏区就不会跳 */
   #micBtn { width: 6.8em; white-space: nowrap; text-align: center; padding-left: 6px; padding-right: 6px; }
+  #micBtn, #micBtn:hover { transform: none; }   /* 状态会频繁变化的按钮不做悬停上浮，免得看起来在抖 */
   .stats b { font-variant-numeric: tabular-nums; }   /* 分数变化时数字宽度一致 */
   button.primary { background: var(--accent); color: #fff; font-weight: 700; }
   button.on { background: var(--blue); color: #fff; }
-  button.warn { background: #ffe7c2; color: #a35200; animation: nudge 1.2s ease-in-out infinite; }
-  @keyframes nudge { 50% { scale: 1.06; } }
+  button.warn { background: #ffe7c2; color: #a35200; }   /* 只变颜色，不做闪动动画 */
 
   #stage { position: relative; flex: 1; overflow: hidden; }
   .ground {
@@ -1577,16 +1577,26 @@ els.micBtn.addEventListener('click', () => {
   els.micBtn.blur();
 });
 let micAnnounced = false;   // 每次开启只提示一次“正在听”，自动续上时不重复弹
+let micRenderTimer = 0;
+let micPrevStatus = 'off';
 Listener.onStatusChange((s) => {
-  renderMicButton();
+  clearTimeout(micRenderTimer);
+  /* 只有从“关”点开时立刻显示“连接中”；其余情况的“连接中”通常一闪而过，0.6 秒后还在才显示，按钮就不会来回闪 */
+  if (s === 'starting' && micPrevStatus !== 'off') micRenderTimer = setTimeout(renderMicButton, 600);
+  else renderMicButton();
+  micPrevStatus = s;
   if (s === 'listening' && !micAnnounced) { micAnnounced = true; toast('正在听：念出卡片上的单词'); }
   if (s === 'off') micAnnounced = false;
 });
 Listener.onProblem((reason, code) => showNotice(explainMicProblem(reason, code)));
 $('#noticeClose').addEventListener('click', hideNotice);
-/* 麦克风被浏览器拦住时，孩子下一次按键 / 点屏幕键盘就顺手把它重新打开 */
+/* 麦克风被浏览器拦住时，孩子下一次按键 / 点屏幕键盘就顺手把它重新打开（最多 1.5 秒试一次，连续按键不会反复触发） */
+let lastBlockedRetry = 0;
 ['keydown', 'pointerdown'].forEach((type) => document.addEventListener(type, (e) => {
-  if (Listener.status === 'blocked' && e.target !== els.micBtn) Listener.start();
+  if (Listener.status !== 'blocked' || e.target === els.micBtn) return;
+  if (performance.now() - lastBlockedRetry < 1500) return;
+  lastBlockedRetry = performance.now();
+  Listener.start();
 }, true));
 els.pauseBtn.addEventListener('click', () => { els.pauseBtn.blur(); if (state.phase === 'playing') pauseGame(); else resumeGame(); });
 $('#resumeBtn').addEventListener('click', resumeGame);
