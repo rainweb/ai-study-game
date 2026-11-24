@@ -704,6 +704,38 @@ const shuffle = (arr) => {
   return out;
 };
 const normalizeSpeech = (s) => ` ${String(s).toLowerCase().replace(/[^a-z' ]/g, ' ').replace(/\s+/g, ' ').trim()} `;
+
+/*
+ * 逐个字母念：识别器听到字母时，可能输出字母本身（"b"），也可能输出同音词（"bee"、"be"）。
+ * 这张表把它们都换回字母。"double p" = pp，"double u / double you" = w。
+ */
+const LETTER_WORDS = Object.freeze({
+  a: 'a', ay: 'a', eh: 'a', b: 'b', be: 'b', bee: 'b', c: 'c', see: 'c', sea: 'c', d: 'd', dee: 'd',
+  e: 'e', ee: 'e', f: 'f', ef: 'f', eff: 'f', g: 'g', gee: 'g', h: 'h', aitch: 'h', i: 'i', eye: 'i',
+  j: 'j', jay: 'j', k: 'k', kay: 'k', l: 'l', el: 'l', ell: 'l', m: 'm', em: 'm', n: 'n', en: 'n',
+  o: 'o', oh: 'o', p: 'p', pee: 'p', pea: 'p', q: 'q', queue: 'q', cue: 'q', r: 'r', are: 'r', ar: 'r',
+  s: 's', es: 's', ess: 's', t: 't', tee: 't', tea: 't', u: 'u', you: 'u', v: 'v', vee: 'v', w: 'w',
+  x: 'x', ex: 'x', y: 'y', why: 'y', z: 'z', zee: 'z', zed: 'z',
+});
+/* 平时说话也常用的词：单独听到又不是下一个字母时，当成随口说话，不提示“念错了” */
+const COMMON_LETTER_WORDS = new Set(['a', 'i', 'oh', 'you', 'are', 'see', 'be', 'eye', 'why', 'tea', 'sea', 'eh']);
+/* 离线识别的限定词表里加上 26 个字母和 double，才能识别逐个字母念 */
+const LETTER_GRAMMAR = Object.freeze([...'abcdefghijklmnopqrstuvwxyz', 'double']);
+
+/* 整句都是字母时返回字母数组；夹着别的词就当普通说话，返回空 */
+function lettersFromSpeech(text) {
+  const tokens = normalizeSpeech(text).trim().split(' ').filter(Boolean);
+  const letters = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const next = tokens[i + 1];
+    if (tokens[i] === 'double' && (next === 'u' || next === 'you')) { letters.push('w'); i++; continue; }
+    if (tokens[i] === 'double' && LETTER_WORDS[next]) { letters.push(LETTER_WORDS[next], LETTER_WORDS[next]); i++; continue; }
+    const letter = LETTER_WORDS[tokens[i]];
+    if (!letter) return { letters: [], casual: false };
+    letters.push(letter);
+  }
+  return { letters, casual: tokens.length === 1 && COMMON_LETTER_WORDS.has(tokens[0]) };
+}
 const formatTime = (sec) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
 
 /* ---------- 设置（本地存储，读写都包 try/catch） ---------- */
@@ -901,7 +933,7 @@ const BrowserListener = (() => {
     rec.onaudiostart = () => { heardAudio = true; quickEnds = 0; };
     rec.onresult = (e) => {
       for (let i = e.resultIndex; i < e.results.length; i++) {
-        for (let j = 0; j < e.results[i].length; j++) onText?.(e.results[i][j].transcript);
+        for (let j = 0; j < e.results[i].length; j++) onText?.(e.results[i][j].transcript, e.results[i].isFinal);
       }
     };
     rec.onerror = (e) => {
@@ -1088,7 +1120,7 @@ const OfflineListener = (() => {
   }
   function grammar() {
     if (!vocabulary.length) return undefined;   // 不在一局里时不限定
-    const phrases = [...vocabulary, ...getDistractors()].map(normalizePhrase).filter(Boolean);
+    const phrases = [...vocabulary, ...getDistractors(), ...LETTER_GRAMMAR].map(normalizePhrase).filter(Boolean);
     return JSON.stringify([...new Set(phrases), '[unk]']);
   }
 
@@ -1107,11 +1139,11 @@ const OfflineListener = (() => {
       lastPartial = '';
       const words = m.result?.result || [];
       const text = words.filter((w) => w.word !== '[unk]' && (w.conf ?? 1) >= MIN_WORD_CONF).map((w) => w.word).join(' ');
-      if (text) onText?.(text);
+      if (text) onText?.(text, true);
     });
     recognizer.on('partialresult', (m) => {
       const partial = (m.result?.partial || '').replace(/\[unk\]/g, '').trim();
-      if (partial && partial === lastPartial) onText?.(partial);
+      if (partial && partial === lastPartial) onText?.(partial, false);
       lastPartial = partial;
     });
   }
@@ -1443,11 +1475,37 @@ function shakeCard() {
   setTimeout(() => els.card.classList.remove('flash'), 320);
 }
 
-function onSpeech(text) {
+/* isFinal：识别器确认这句话说完了（中途结果会不停变化，逐个字母只按确认后的结果填，免得重复填） */
+function onSpeech(text, isFinal = true) {
   const cur = state.current;
   if (state.phase !== 'playing' || !cur || cur.status !== 'falling') return;
   if (Voice.isEchoTime()) return;   // 喇叭正在读这个词，别把它当成孩子念的
-  if (normalizeSpeech(text).includes(normalizeSpeech(cur.word.en))) fillByVoice(cur);
+  if (normalizeSpeech(text).includes(normalizeSpeech(cur.word.en))) { fillByVoice(cur); return; }
+  if (!isFinal) return;
+  const { letters, casual } = lettersFromSpeech(text);
+  if (letters.length) spellByVoice(cur, letters, casual);
+}
+
+/*
+ * 逐个字母念：念对的字母填进格子（和打字一样有声音、拼完自动算对）；
+ * 念错的字母不填进去（语音没法退格），卡片抖一下并提示听到的是哪个字母。
+ */
+function spellByVoice(cur, letters, casual) {
+  for (const letter of letters) {
+    if (state.current !== cur || cur.status !== 'falling') return;
+    const pos = correctPrefixLength();
+    if (state.buffer.length > pos) { state.buffer = state.buffer.slice(0, pos); renderSlots(); }   // 先去掉之前打错的字母
+    const expected = cur.word.en[pos];
+    if (expected && expected.toLowerCase() === letter) {
+      typeLetter(letter);
+    } else {
+      if (casual) return;   // 单独一个 "you"、"oh" 这类，多半是随口说话，不提示
+      Sound.wrong();
+      shakeCard();
+      toast(`听到的是 ${letter.toUpperCase()}，再念一次`);
+      return;
+    }
+  }
 }
 
 function correctPrefixLength() {
