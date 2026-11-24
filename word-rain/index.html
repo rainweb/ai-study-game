@@ -315,7 +315,7 @@
         <div class="row">
           <span class="label">识别方式</span>
           <select id="asrSelect">
-            <option value="auto">自动（安卓用离线）</option>
+            <option value="auto">自动（离线优先）</option>
             <option value="browser">系统识别（在线）</option>
             <option value="offline">离线识别</option>
           </select>
@@ -846,12 +846,24 @@ const Voice = (() => {
     synth.addEventListener?.('voiceschanged', load);   // Chrome 的声音列表是异步加载的
     [300, 1000, 3000].forEach((ms) => setTimeout(() => { if (voices.length === 0) load(); }, ms));  // Safari 有时不触发事件
   }
+  /*
+   * 自己记录是否在朗读，不用 synth.speaking：iOS 上它有时读完了还一直是 true，onend 也可能不触发，
+   * 那样会一直当成「喇叭在响」，把孩子念的全部忽略。所以最多按 MAX_SPEAK_MS 算。
+   */
+  const MAX_SPEAK_MS = 4000;
   let lastSpeechEnd = 0;
+  let speakingSince = 0;
+  let utterId = 0;
   return {
     supported: Boolean(synth),
     onChange(cb) { listeners.push(cb); cb(voices); },
     /* 正在朗读或刚读完：这时麦克风听到的可能是喇叭里的读音，不能算孩子念对 */
-    isEchoTime: () => Boolean(synth && synth.speaking) || performance.now() - lastSpeechEnd < 400,
+    isEchoTime() {
+      const now = performance.now();
+      return (speakingSince > 0 && now - speakingSince < MAX_SPEAK_MS) || now - lastSpeechEnd < 400;
+    },
+    /* 最近一次朗读结束的时间（还在读就是现在） */
+    lastEnd: () => (speakingSince > 0 ? performance.now() : lastSpeechEnd),
     speak(text) {
       if (!synth) return;
       synth.cancel();
@@ -860,7 +872,16 @@ const Voice = (() => {
       u.lang = voice ? voice.lang : 'en-US';
       if (voice) u.voice = voice;
       u.rate = settings.rate;
-      u.onend = () => { lastSpeechEnd = performance.now(); };
+      const id = ++utterId;
+      const done = () => {
+        if (id !== utterId) return;   // 被下一次朗读顶掉的那句，不管它
+        speakingSince = 0;
+        lastSpeechEnd = performance.now();
+      };
+      u.onend = done;
+      u.onerror = done;
+      speakingSince = performance.now();
+      setTimeout(done, MAX_SPEAK_MS);   // onend 没来也按读完算
       synth.speak(u);
     },
     stop() { if (synth) synth.cancel(); },
@@ -1031,6 +1052,22 @@ const OfflineListener = (() => {
   let sink = null;
   let vocabulary = [];
   let session = 0;   // 每次开启的编号：中途被关掉时，还在进行的加载就不再接着开麦克风
+  const MIC_CONSTRAINTS = { audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } };
+
+  /*
+   * iPhone 上朗读单词会打断麦克风：读完后麦克风变成静音、或音频暂停，页面却不知道，
+   * 看起来还在「正在听」，其实什么都收不到，要再点一次 🎤 才恢复。
+   * 这里每秒检查一次，发现收不到声音就自己把麦克风重新接上；实在接不上（浏览器要求点一下）就显示「点我继续」。
+   */
+  const WATCH_MS = 1000;
+  const STALL_MS = 2500;          // 这么久没有音频数据进来 = 音频停了
+  const SILENT_AFTER_SPEAK_MS = 1500;   // 朗读完这么久，麦克风还是完全没声音（全是 0）= 麦克风被静音了
+  const RESUME_TIMEOUT_MS = 1500;
+  let watchTimer = null;
+  let healing = false;
+  let lastFrameAt = 0;
+  let lastSoundAt = 0;
+  let lastHealAt = 0;
 
   const setStatus = (s) => { status = s; onStatus?.(s); };
   const failWith = (reason) => Object.assign(new Error(reason), { reason });
@@ -1148,7 +1185,55 @@ const OfflineListener = (() => {
     });
   }
 
+  const hasSound = (data) => { for (let i = 0; i < data.length; i++) if (data[i] !== 0) return true; return false; };
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))]);
+  const micTrack = () => stream?.getAudioTracks()[0];
+
+  function onAudio(e) {
+    const now = performance.now();
+    lastFrameAt = now;
+    if (hasSound(e.inputBuffer.getChannelData(0))) lastSoundAt = now;   // 真麦克风总有底噪，完全是 0 说明被静音了
+    if (Voice.isEchoTime()) return;   // 游戏自己在朗读：不把喇叭里的声音送去识别
+    try { recognizer?.acceptWaveform(e.inputBuffer); } catch (_) {}
+  }
+
+  function watch() {
+    if (status !== 'listening' || healing || !ctx || Voice.isEchoTime()) return;
+    const now = performance.now();
+    const track = micTrack();
+    const spokeAt = Voice.lastEnd();
+    const micDead = !track || track.readyState === 'ended' || track.muted
+      || (spokeAt > lastHealAt && spokeAt > lastSoundAt && now - spokeAt > SILENT_AFTER_SPEAK_MS);
+    const audioStopped = ctx.state !== 'running' || now - lastFrameAt > STALL_MS;
+    if (micDead || audioStopped) { lastHealAt = now; heal(micDead); }
+  }
+
+  async function heal(renewMic) {
+    healing = true;
+    const mySession = session;
+    try {
+      if (ctx.state !== 'running') await withTimeout(ctx.resume(), RESUME_TIMEOUT_MS).catch(() => {});
+      if (renewMic) {
+        try { source?.disconnect(); } catch (_) {}
+        stream?.getTracks().forEach((t) => t.stop());
+        const fresh = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
+        if (mySession !== session) { fresh.getTracks().forEach((t) => t.stop()); return; }
+        stream = fresh;
+        source = ctx.createMediaStreamSource(stream);
+        source.connect(processor);
+      }
+      lastFrameAt = lastSoundAt = performance.now();
+      if (ctx.state !== 'running') throw new Error('suspended');
+    } catch (_) {
+      if (mySession === session) setStatus('blocked');   // 等孩子下一次点屏幕 / 按键时重新开启
+    } finally {
+      healing = false;
+    }
+  }
+
   function cleanup() {
+    clearInterval(watchTimer);
+    watchTimer = null;
     if (processor) { processor.onaudioprocess = null; try { processor.disconnect(); } catch (_) {} }
     try { source?.disconnect(); sink?.disconnect(); } catch (_) {}
     stream?.getTracks().forEach((t) => t.stop());
@@ -1162,11 +1247,12 @@ const OfflineListener = (() => {
     if (!supported) { onProblem?.('offline-unsupported', ''); return; }
     if (!window.isSecureContext || location.protocol === 'file:') { onProblem?.('offline-file', ''); return; }
     if (status === 'starting' || status === 'listening') return;
+    if (status === 'blocked') { session++; cleanup(); }   // 卡住了：整个重新开
     const mySession = ++session;
     setStatus('starting');
     ctx = new AC();   // 要在点击时创建，手机浏览器才允许使用音频
     try {
-      const mic = navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
+      const mic = navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
       mic.catch(() => {});   // 避免下载失败时出现未处理的 Promise 报错
       const [micStream, loadedModel] = await Promise.all([mic, ensureModel()]);
       stream = micStream;
@@ -1178,13 +1264,12 @@ const OfflineListener = (() => {
       sink = ctx.createGain();
       sink.gain.value = 0;   // 处理节点要接到输出才会工作，音量设 0 免得把麦克风的声音放出来
       makeRecognizer();
-      processor.onaudioprocess = (e) => {
-        if (Voice.isEchoTime()) return;   // 游戏自己在朗读：不把喇叭里的声音送去识别
-        try { recognizer?.acceptWaveform(e.inputBuffer); } catch (_) {}
-      };
+      processor.onaudioprocess = onAudio;
       source.connect(processor);
       processor.connect(sink);
       sink.connect(ctx.destination);
+      lastFrameAt = lastSoundAt = lastHealAt = performance.now();
+      watchTimer = setInterval(watch, WATCH_MS);
       setStatus('listening');
     } catch (e) {
       if (mySession !== session) return;
@@ -1216,15 +1301,14 @@ const OfflineListener = (() => {
 
 /*
  * 统一入口：按设置选识别方式。
- * 自动：安卓用离线（国内安卓 Chrome 大多用不了 Google 识别）；iPhone、电脑用系统识别，浏览器不支持时也用离线。
+ * 自动：所有设备都优先用离线识别（只认词库里的词，比系统识别准）；浏览器跑不了离线识别时（比如本地文件打开）才用系统识别。
  */
 const Listener = (() => {
   const engines = { browser: BrowserListener, offline: OfflineListener };
   let active = null;
   const pick = () => {
     if (settings.asr === 'browser' || settings.asr === 'offline') return settings.asr;
-    if (DEVICE.android) return 'offline';
-    return BrowserListener.supported ? 'browser' : 'offline';
+    return OfflineListener.supported ? 'offline' : 'browser';
   };
   const current = () => engines[active || pick()];
   return {
@@ -1955,7 +2039,7 @@ function renderAsrHint() {
   const engine = Listener.engine;
   $('#asrHint').textContent = engine === 'offline'
     ? '当前：离线识别（第一次要下载约 40MB 模型，之后不用联网）'
-    : '当前：系统识别（iPhone、电脑效果好；安卓要能连上 Google）';
+    : '当前：系统识别（在线；安卓要能连上 Google）';
 }
 $('#asrSelect').addEventListener('change', (e) => {
   const value = ['browser', 'offline'].includes(e.target.value) ? e.target.value : 'auto';
