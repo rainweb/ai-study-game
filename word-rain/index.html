@@ -47,8 +47,11 @@
   }
   button:hover:not(:disabled) { transform: translateY(-1px); }
   button:disabled { opacity: .45; cursor: not-allowed; }
+  button.muted { opacity: .55; }
   button.primary { background: var(--accent); color: #fff; font-weight: 700; }
   button.on { background: var(--blue); color: #fff; }
+  button.warn { background: #ffe7c2; color: #a35200; animation: nudge 1.2s ease-in-out infinite; }
+  @keyframes nudge { 50% { scale: 1.06; } }
 
   #stage { position: relative; flex: 1; overflow: hidden; }
   .ground {
@@ -134,6 +137,30 @@
 
   #toast { position: absolute; left: 50%; bottom: 120px; transform: translateX(-50%); z-index: 40; background: rgba(34,48,74,.9); color: #fff; padding: 10px 16px; border-radius: 12px; font-size: 14px; opacity: 0; transition: opacity .3s; pointer-events: none; }
   #toast.show { opacity: 1; }
+  /* 语音用不了时的说明条：不自动消失，方便家长看清原因 */
+  .notice {
+    position: absolute; top: 10px; left: 50%; transform: translateX(-50%); z-index: 25;
+    width: min(560px, calc(100% - 24px)); display: flex; gap: 10px; align-items: flex-start;
+    padding: 10px 12px; border-radius: 12px; background: #fff8e6; border: 1px solid #ffd591;
+    color: #6b4200; font-size: 14px; line-height: 1.5; box-shadow: 0 6px 18px rgba(30,60,120,.15);
+  }
+  .notice span { flex: 1; }
+  .notice button { padding: 2px 8px; flex: none; }
+
+  /* 轻松模式：卡片浮在中间，右下角有提示 / 跳过；挑战模式隐藏这些、显示掉落速度 */
+  .relax-actions { position: absolute; right: 14px; bottom: calc(var(--ground) + 12px); z-index: 14; display: none; gap: 8px; }
+  #app.play-relax.is-playing .relax-actions { display: flex; }
+  #app.play-relax #speedTuner { display: none; }
+  .slot.ghost { color: #b9c6de; }
+  .card.appear { animation: appear .35s ease-out; }
+  @keyframes appear { from { opacity: 0; scale: .85; } }
+
+  /* 花园：每拼对一个词长一朵花，用了提示/跳过的长一棵小芽 */
+  .garden { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+  .flower { position: absolute; font-size: 28px; line-height: 1; translate: -50% 0; transform-origin: bottom center; animation: grow .6s cubic-bezier(.3, 1.6, .5, 1) both; }
+  @keyframes grow { from { scale: 0; } }
+  .garden-summary { margin: 0 0 12px; color: var(--muted); }
+  .garden-summary .flowers { display: block; margin-top: 4px; font-size: 24px; letter-spacing: 2px; word-break: break-all; }
 
   /* 屏幕键盘：只在触屏设备、游戏进行中显示；接了实体键盘打过字就自动收起 */
   .osk {
@@ -179,6 +206,9 @@
     #shooter { width: 48px; margin-left: -24px; bottom: calc(var(--ground) - 16px); }
     #shooter svg { width: 48px; height: 58px; }
     #toast { bottom: 76px; width: max-content; max-width: calc(100vw - 32px); }
+    .flower { font-size: 22px; }
+    .relax-actions { right: 10px; bottom: calc(var(--ground) + 8px); }
+    .relax-actions button { padding: 6px 10px; font-size: 14px; }
 
     .overlay { padding: 10px; align-items: flex-start; }
     .panel { padding: 16px; border-radius: 18px; }
@@ -209,7 +239,7 @@
       <div>剩余 <b id="left">0</b></div>
     </div>
     <div class="tuners">
-      <label>掉落速度 <input id="speedRange" type="range" min="1" max="10" step="1"><span id="speedVal"></span></label>
+      <label id="speedTuner">掉落速度 <input id="speedRange" type="range" min="1" max="10" step="1"><span id="speedVal"></span></label>
       <label>语速 <input id="rateRange" type="range" min="0.5" max="1.2" step="0.1"><span id="rateVal"></span></label>
     </div>
     <div class="actions">
@@ -229,7 +259,11 @@
       <div class="slots"></div>
     </div>
     <div id="praise"></div>
-    <div class="ground"></div>
+    <div class="ground"><div id="garden" class="garden" aria-hidden="true"></div></div>
+    <div class="relax-actions">
+      <button id="hintBtn" title="显示下一个字母（回车）">💡 提示</button>
+      <button id="skipBtn" title="先跳过，等会儿再来">⏭ 跳过</button>
+    </div>
     <div id="shooter" aria-hidden="true">
       <svg viewBox="0 0 80 96" width="64" height="77">
         <rect x="34" y="2" width="12" height="26" rx="5" fill="#ff8a3d"/>
@@ -258,6 +292,11 @@
           <span class="label">练习模式</span>
           <label class="chip"><input type="radio" name="mode" value="zh"> 看中文 · 拼英文</label>
           <label class="chip"><input type="radio" name="mode" value="en"> 看英文 · 照着拼</label>
+        </div>
+        <div class="row">
+          <span class="label">玩法</span>
+          <label class="chip"><input type="radio" name="play" value="relax"> 🌱 轻松：不限时，种花园</label>
+          <label class="chip"><input type="radio" name="play" value="challenge"> ☔ 挑战：单词会下落</label>
         </div>
         <div class="row">
           <span class="label">主题</span>
@@ -318,25 +357,30 @@
       <div class="panel">
         <h2>🎉 本局完成！</h2>
         <div class="tiles">
-          <div class="tile"><b id="sumAcc">0%</b><span>拼对率</span></div>
+          <div class="tile"><b id="sumAcc">0%</b><span id="sumAccLabel">拼对率</span></div>
           <div class="tile"><b id="sumCombo">0</b><span>最高连击</span></div>
           <div class="tile"><b id="sumTime">0:00</b><span>用时</span></div>
           <div class="tile"><b id="sumScore">0</b><span>得分</span></div>
         </div>
+        <p id="gardenSummary" class="garden-summary"></p>
         <div id="missedBox">
-          <b>漏掉的词，再看一眼：</b>
+          <b>这些词再看一眼：</b>
           <ul class="missed" id="missedList"></ul>
         </div>
         <p id="perfect" class="lead hidden">一个都没漏，太厉害了！</p>
         <div class="buttons">
           <button id="backBtn">返回设置</button>
-          <button id="missedOnlyBtn">只练漏掉的词</button>
+          <button id="missedOnlyBtn">只练这些词</button>
           <button id="againBtn" class="primary">再来一局（回车）</button>
         </div>
       </div>
     </section>
 
     <div id="toast"></div>
+    <div id="notice" class="notice hidden" role="alert">
+      <span id="noticeText"></span>
+      <button id="noticeClose" aria-label="关闭">✕</button>
+    </div>
   </main>
   <div id="osk" class="osk" aria-label="屏幕键盘"></div>
 </div>
@@ -620,7 +664,13 @@ const DEFAULT_WORDS = [
   'nurse 护士', 'driver 司机', 'farmer 农民', 'cook 厨师', 'football 足球', 'basketball 篮球',
   'friend 朋友', 'music 音乐'
 ].join('\n');
-const DEFAULTS = Object.freeze({ mode: 'zh', theme: 'classic', rate: 0.8, speed: 3, perRound: 10, words: DEFAULT_WORDS });
+const DEFAULTS = Object.freeze({ play: 'relax', mode: 'zh', theme: 'classic', rate: 0.8, speed: 3, perRound: 10, words: DEFAULT_WORDS });
+/* 轻松模式的提示节奏（秒，从上次拼对一个字母算起） */
+const HINT_REPEAT_AFTER = 8;    // 先再读一遍
+const HINT_FIRST_AFTER = 14;    // 再浅色显示下一个字母
+const HINT_NEXT_AFTER = 6;      // 之后每隔几秒再多显示一个
+const FLOWERS = ['🌷', '🌻', '🌼', '🌸', '🌺'];
+const SPROUT = '🌱';
 const PER_ROUND_OPTIONS = [0, 5, 10, 15, 20];
 const PRAISES = ['太棒了！', 'Great!', 'Nice!', '厉害！', 'Perfect!', '漂亮！', 'Good job!', '对啦！'];
 const PARTICLE_COLORS = ['#ff7a45', '#ffc53d', '#4f7cff', '#36cfc9', '#f759ab', '#73d13d'];
@@ -651,6 +701,7 @@ function loadSettings() {
   const perRound = Number(raw.perRound);
   return Object.freeze({
     mode: raw.mode === 'en' ? 'en' : 'zh',
+    play: raw.play === 'challenge' ? 'challenge' : 'relax',
     theme: raw.theme === 'shooter' ? 'shooter' : 'classic',
     rate: clamp(Number(raw.rate) || DEFAULTS.rate, 0.5, 1.2),
     speed: clamp(Math.round(Number(raw.speed) || DEFAULTS.speed), 1, 10),
@@ -750,9 +801,12 @@ const Voice = (() => {
     synth.addEventListener?.('voiceschanged', load);   // Chrome 的声音列表是异步加载的
     [300, 1000, 3000].forEach((ms) => setTimeout(() => { if (voices.length === 0) load(); }, ms));  // Safari 有时不触发事件
   }
+  let lastSpeechEnd = 0;
   return {
     supported: Boolean(synth),
     onChange(cb) { listeners.push(cb); cb(voices); },
+    /* 正在朗读或刚读完：这时麦克风听到的可能是喇叭里的读音，不能算孩子念对 */
+    isEchoTime: () => Boolean(synth && synth.speaking) || performance.now() - lastSpeechEnd < 400,
     speak(text) {
       if (!synth) return;
       synth.cancel();
@@ -761,6 +815,7 @@ const Voice = (() => {
       u.lang = voice ? voice.lang : 'en-US';
       if (voice) u.voice = voice;
       u.rate = settings.rate;
+      u.onend = () => { lastSpeechEnd = performance.now(); };
       synth.speak(u);
     },
     stop() { if (synth) synth.cancel(); },
@@ -768,41 +823,118 @@ const Voice = (() => {
 })();
 
 /* ---------- 语音识别（可选；Chrome 的识别需要联网） ---------- */
+/*
+ * 浏览器的识别会话说完一句或安静几秒就会自己结束，这里负责自动续上。
+ * 状态：off（关）/ starting（连接中）/ listening（正在听）/ blocked（浏览器不让自动重开，需要点一下或按一下键）
+ */
 const Listener = (() => {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const MAX_RETRIES = 6;
+  const START_TIMEOUT_MS = 8000;   // 点了开启却一直连不上（安卓 Chrome 连不到 Google 时常见）
   let rec = null;
-  let wanted = false;
+  let status = 'off';
   let onText = null;
+  let onStatus = null;
+  let onProblem = null;
+  let retries = 0;
+  let retryTimer = 0;
+  let startTimer = 0;
+  let fromGesture = false;   // 这次开启是不是用户亲手点的（浏览器对“自动重开”更严格）
+  let everListened = false;  // 这次开启后有没有真正开始听过
+
+  const setStatus = (s) => { status = s; onStatus?.(s); };
+
+  /* 用不了：关掉语音，并把原因交给界面去解释 */
+  function fail(reason, code = '') {
+    clearTimeout(retryTimer);
+    clearTimeout(startTimer);
+    setStatus('off');
+    if (rec) try { rec.abort(); } catch (_) {}
+    onProblem?.(reason, code);
+  }
+
+  function tryStart() {
+    clearTimeout(retryTimer);
+    if (status === 'off' || status === 'blocked') return;
+    try {
+      rec.start();
+    } catch (_) {
+      /* 上一段还没完全结束（InvalidStateError）：稍后重试，而不是悄悄放弃 */
+      if (retries++ < MAX_RETRIES) retryTimer = setTimeout(tryStart, 300 * retries);
+      else setStatus('blocked');
+    }
+  }
+
   function build() {
     rec = new SR();
     rec.lang = 'en-US';
     rec.continuous = true;
     rec.interimResults = true;
     rec.maxAlternatives = 3;
+    rec.onstart = () => {
+      retries = 0;
+      fromGesture = false;
+      everListened = true;
+      clearTimeout(startTimer);
+      setStatus('listening');
+    };
     rec.onresult = (e) => {
       for (let i = e.resultIndex; i < e.results.length; i++) {
         for (let j = 0; j < e.results[i].length; j++) onText?.(e.results[i][j].transcript);
       }
     };
     rec.onerror = (e) => {
-      const fatal = { 'not-allowed': '没有麦克风权限，语音已关闭', 'service-not-allowed': '没有麦克风权限，语音已关闭', network: '语音识别需要联网，已关闭' };
-      if (fatal[e.error]) { wanted = false; toast(fatal[e.error]); renderMicButton(); }
+      switch (e.error) {
+        case 'not-allowed':
+          if (fromGesture || !everListened) { fail('permission', e.error); return; }
+          /* 之前能用、自动重开被拒：多半是 file:// 打开或 Safari，需要一次点击/按键 */
+          setStatus('blocked');
+          toast('浏览器不让自动重开麦克风：点一下 🎤 或按任意字母键继续');
+          return;
+        case 'service-not-allowed': fail('service', e.error); return;   // 识别服务不可用（安卓无 Google 服务、iOS 没开听写）
+        case 'network': fail('network', e.error); return;
+        case 'audio-capture': fail('nomic', e.error); return;
+        case 'language-not-supported': fail('language', e.error); return;
+        case 'no-speech':
+        case 'aborted':
+          return;   // 正常情况：等 onend 自动续上
+        default:
+          fail('unknown', e.error);
+      }
     };
-    rec.onend = () => { if (wanted) setTimeout(() => { if (wanted) try { rec.start(); } catch (_) {} }, 250); };
+    rec.onend = () => {
+      if (status === 'listening' || status === 'starting') {
+        setStatus('starting');
+        retryTimer = setTimeout(tryStart, 150);
+      }
+    };
   }
+
   return {
     supported: Boolean(SR),
-    get on() { return wanted; },
+    get on() { return status !== 'off'; },
+    get status() { return status; },
+    onStatusChange(cb) { onStatus = cb; },
+    onProblem(cb) { onProblem = cb; },
+    /* 用户亲手开启（点按钮），或在 blocked 时借用户的一次点击/按键重新开启 */
     start(cb) {
-      if (!SR) return;
+      if (!SR) { onProblem?.('unsupported', ''); return; }
+      if (!window.isSecureContext) { onProblem?.('insecure', ''); return; }
       if (!rec) build();
-      onText = cb;
-      wanted = true;
-      try { rec.start(); } catch (_) { /* 已在运行 */ }
+      if (cb) onText = cb;
+      if (status === 'off') everListened = false;
+      fromGesture = true;
+      retries = 0;
+      setStatus('starting');
+      clearTimeout(startTimer);
+      startTimer = setTimeout(() => { if (status === 'starting' && !everListened) fail('timeout'); }, START_TIMEOUT_MS);
+      tryStart();
     },
     stop() {
-      wanted = false;
-      if (rec) try { rec.stop(); } catch (_) {}
+      clearTimeout(retryTimer);
+      clearTimeout(startTimer);
+      setStatus('off');
+      if (rec) try { rec.abort(); } catch (_) {}
     },
   };
 })();
@@ -817,7 +949,9 @@ const els = {
   menuPanel: $('#menuPanel'), pausePanel: $('#pausePanel'), summaryPanel: $('#summaryPanel'),
   wordsInput: $('#wordsInput'), wordCount: $('#wordCount'), perRound: $('#perRound'), menuError: $('#menuError'),
   missedBox: $('#missedBox'), missedList: $('#missedList'), perfect: $('#perfect'), missedOnlyBtn: $('#missedOnlyBtn'),
+  garden: $('#garden'),
 };
+const isRelax = () => settings.play === 'relax';
 
 /* ---------- 游戏状态 ---------- */
 const state = {
@@ -825,6 +959,7 @@ const state = {
   queue: [], roundSize: 0, current: null, buffer: '',
   score: 0, combo: 0, maxCombo: 0, correct: 0, misses: 0, missed: new Map(),
   elapsed: 0, lastTs: 0, raf: 0, nextTimer: 0, pendingSpawn: false, shooterX: 0,
+  planted: [],              // 本局花园里长出的花 / 小芽
 };
 
 const floorY = () => els.stage.clientHeight - parseInt(getComputedStyle(document.documentElement).getPropertyValue('--ground'), 10);
@@ -848,7 +983,7 @@ function showPraise(text, soft = false) {
 function updateHud() {
   els.score.textContent = state.score;
   els.combo.textContent = state.combo;
-  els.left.textContent = state.queue.length + (state.current?.status === 'falling' ? 1 : 0);
+  els.left.textContent = state.queue.length + (['falling', 'filling'].includes(state.current?.status) ? 1 : 0);
   els.pauseBtn.disabled = !['playing', 'paused'].includes(state.phase);
   els.app.classList.toggle('is-playing', ['playing', 'paused'].includes(state.phase));
 }
@@ -860,11 +995,53 @@ function renderTuners() {
   els.rateVal.textContent = `${settings.rate.toFixed(1)}x`;
 }
 
+const MIC_LABELS = { off: '🎤 语音', starting: '🎤 连接中…', listening: '🎤 正在听', blocked: '🎤 点一下继续听' };
+
+/* ---------- 语音用不了时：按设备说清楚原因和办法 ---------- */
+const UA = navigator.userAgent;
+const DEVICE = Object.freeze({
+  android: /Android/i.test(UA),
+  ios: /iPhone|iPad|iPod/i.test(UA) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1),
+  inApp: /MicroMessenger|QQ\/|AlipayClient|DingTalk|Lark|Feishu|Weibo/i.test(UA),   // 微信、QQ、钉钉、飞书等 App 内置浏览器
+});
+const TYPE_INSTEAD = '不用语音也能玩：直接打字拼写就行。';
+
+function explainMicProblem(reason, code) {
+  if (reason === 'unsupported') {
+    if (DEVICE.inApp) return `App 里的浏览器（比如微信）不支持语音识别。点右上角「···」选「在浏览器打开」${DEVICE.ios ? '（iPhone 用 Safari）' : ''}。${TYPE_INSTEAD}`;
+    if (DEVICE.android) return `这个浏览器不支持语音识别。安卓上只有 Chrome 支持，但它要用 Google 的语音服务，国内大多数安卓手机连不上。${TYPE_INSTEAD}`;
+    if (DEVICE.ios) return `需要 iOS 14.5 以上的 Safari 才能用语音识别。${TYPE_INSTEAD}`;
+    return `这个浏览器不支持语音识别，可以换 Chrome、Edge 或 Safari。${TYPE_INSTEAD}`;
+  }
+  if (reason === 'insecure') return `语音识别需要用 https 网址打开（比如 GitHub 上的地址），本地文件或 http 网址用不了麦克风。${TYPE_INSTEAD}`;
+  if (reason === 'permission') {
+    if (DEVICE.ios) return '没有拿到麦克风权限：请在「设置 › Safari › 麦克风」里选「允许」，然后再点 🎤。';
+    if (DEVICE.android) return '没有拿到麦克风权限：点地址栏左边的图标允许麦克风；手机「设置 › 应用 › Chrome › 权限」里也要打开麦克风。';
+    return '没有拿到麦克风权限：点地址栏左边的图标，允许这个网页使用麦克风，然后再点 🎤。';
+  }
+  if (reason === 'service' && DEVICE.ios) return '语音识别没打开：请在「设置 › 通用 › 键盘」里打开「启用听写」，然后再点 🎤。';
+  if (['service', 'network', 'timeout'].includes(reason)) {
+    if (DEVICE.android) return `这台安卓手机用不了语音识别：安卓 Chrome 的语音识别要用 Google 的服务，国内一般连不上。可以换 iPhone / iPad 玩语音。${TYPE_INSTEAD}`;
+    if (DEVICE.ios) return `语音识别连不上，请检查网络后再点 🎤。${TYPE_INSTEAD}`;
+    return `语音识别连不上：电脑上的 Chrome / Edge 要连接 Google 或微软的服务器，当前网络访问不了。${TYPE_INSTEAD}`;
+  }
+  if (reason === 'nomic') return `没找到麦克风，请检查是否插好或被其他程序占用。${TYPE_INSTEAD}`;
+  if (reason === 'language') return `这个浏览器不支持英语语音识别。${TYPE_INSTEAD}`;
+  return `语音识别出错了（${code || reason}）。${TYPE_INSTEAD}`;
+}
+
+function showNotice(text) {
+  $('#noticeText').textContent = text;
+  $('#notice').classList.remove('hidden');
+}
+const hideNotice = () => $('#notice').classList.add('hidden');
 function renderMicButton() {
-  els.micBtn.disabled = !Listener.supported;
-  els.micBtn.title = Listener.supported ? '打开后直接念出单词也算对' : '当前浏览器不支持语音识别（建议用 Chrome）';
-  els.micBtn.classList.toggle('on', Listener.on);
-  els.micBtn.textContent = Listener.on ? '🎤 语音：开' : '🎤 语音';
+  const s = Listener.status;
+  els.micBtn.title = Listener.supported ? '打开后直接念出单词也算对' : '这个浏览器不支持语音识别，点一下看原因';
+  els.micBtn.classList.toggle('muted', !Listener.supported);
+  els.micBtn.classList.toggle('on', s === 'listening' || s === 'starting');
+  els.micBtn.classList.toggle('warn', s === 'blocked');
+  els.micBtn.textContent = MIC_LABELS[s] || MIC_LABELS.off;
 }
 
 function showOverlay(which) {
@@ -875,6 +1052,7 @@ function showOverlay(which) {
 function renderSlots() {
   const target = state.current.word.en;
   const typed = state.buffer;
+  const reveal = state.current.reveal || 0;   // 轻松模式提示：前 reveal 个位置浅色显示答案
   const frag = document.createDocumentFragment();
   for (let i = 0; i < target.length; i++) {
     const span = document.createElement('span');
@@ -886,6 +1064,9 @@ function renderSlots() {
       const ok = typed[i].toLowerCase() === ch.toLowerCase();
       span.className = `slot ${ok ? 'ok' : 'bad'}`;
       span.textContent = ok ? ch : typed[i];
+    } else if (i < reveal) {
+      span.className = 'slot ghost';
+      span.textContent = ch;
     } else {
       span.className = 'slot';
       span.textContent = ' ';
@@ -915,20 +1096,27 @@ function spawnNext() {
 
   const word = state.queue.shift();
   const showZh = settings.mode === 'zh' && word.zh;
-  state.current = { word, status: 'falling', x: 0, y: 0, w: 0, h: 0, halfSpoken: false };
+  state.current = {
+    word, status: 'falling', x: 0, y: 0, w: 0, h: 0, halfSpoken: false,
+    t: 0, idle: 0, repeated: false, reveal: 0, nextHintAt: HINT_FIRST_AFTER, helped: false,
+  };
   state.buffer = '';
   autoFillSeparators();
 
   els.prompt.textContent = showZh ? word.zh : word.en;
   els.sub.textContent = showZh ? '听发音，拼出英文' : (word.zh || '照着拼一遍');
-  els.card.className = 'card';
+  els.card.className = isRelax() ? 'card appear' : 'card';
   renderSlots();
 
   const cur = state.current;
   cur.w = els.card.offsetWidth;
   cur.h = els.card.offsetHeight;
-  cur.x = rand(16, Math.max(16, els.stage.clientWidth - cur.w - 16));
-  cur.y = -cur.h;
+  if (isRelax()) {
+    floatCard(cur);
+  } else {
+    cur.x = rand(16, Math.max(16, els.stage.clientWidth - cur.w - 16));
+    cur.y = -cur.h;
+  }
   placeCard();
   Voice.speak(word.en);
   updateHud();
@@ -945,7 +1133,11 @@ function typeLetter(ch) {
   const ok = ch.toLowerCase() === target[i].toLowerCase();
   state.buffer += ok ? target[i] : ch;   // 打错也保留，不吞已打的字，退格自己删
   autoFillSeparators();
-  if (ok) Sound.key(); else { Sound.wrong(); shakeCard(); }
+  if (ok) {
+    Sound.key();
+    cur.idle = 0;                          // 有进展就重新计时，不急着给提示
+    cur.nextHintAt = cur.helped ? HINT_NEXT_AFTER : HINT_FIRST_AFTER;
+  } else { Sound.wrong(); shakeCard(); }
   renderSlots();
   if (state.buffer.toLowerCase() === target.toLowerCase()) completeWord(false);
 }
@@ -970,11 +1162,90 @@ function shakeCard() {
 function onSpeech(text) {
   const cur = state.current;
   if (state.phase !== 'playing' || !cur || cur.status !== 'falling') return;
-  if (normalizeSpeech(text).includes(normalizeSpeech(cur.word.en))) {
-    state.buffer = cur.word.en;
+  if (Voice.isEchoTime()) return;   // 喇叭正在读这个词，别把它当成孩子念的
+  if (normalizeSpeech(text).includes(normalizeSpeech(cur.word.en))) fillByVoice(cur);
+}
+
+function correctPrefixLength() {
+  const target = state.current.word.en;
+  let i = 0;
+  while (i < state.buffer.length && state.buffer[i].toLowerCase() === target[i].toLowerCase()) i++;
+  return i;
+}
+
+/* 念对后不是一下子填满，而是一个字母一个字母地填（总时长约 1.4 秒，单个字母 70–180ms），卡片停住不再下落 */
+function fillByVoice(cur) {
+  cur.status = 'filling';
+  const target = cur.word.en;
+  const stepMs = clamp(1400 / target.length, 70, 180);
+  state.buffer = state.buffer.slice(0, correctPrefixLength());
+  const step = () => {
+    if (state.current !== cur || cur.status !== 'filling') return;
+    if (state.phase === 'paused') { cur.fillTimer = setTimeout(step, 200); return; }
+    if (state.phase !== 'playing') return;
+    if (state.buffer.length >= target.length) { completeWord(true); return; }
+    state.buffer += target[state.buffer.length];
+    autoFillSeparators();
+    Sound.key();
     renderSlots();
-    completeWord(true);
-  }
+    cur.fillTimer = setTimeout(step, stepMs);
+  };
+  step();
+}
+
+/* ---------- 轻松模式：提示 / 跳过 ---------- */
+function markHelped(word) {
+  const prev = state.missed.get(word.en);
+  state.missed.set(word.en, { word, count: (prev?.count || 0) + 1 });
+}
+
+function revealHint() {
+  const cur = state.current;
+  if (!cur || cur.status !== 'falling') return;
+  const target = cur.word.en;
+  let next = Math.max(cur.reveal, correctPrefixLength());
+  while (next < target.length && !isLetter(target[next])) next++;
+  if (next >= target.length) return;
+  cur.reveal = next + 1;
+  cur.helped = true;
+  cur.idle = 0;
+  cur.nextHintAt = HINT_NEXT_AFTER;
+  renderSlots();
+}
+
+function skipWord() {
+  const cur = state.current;
+  if (!isRelax() || !cur || cur.status !== 'falling') return;
+  cur.status = 'missed';
+  state.combo = 0;
+  markHelped(cur.word);
+  state.queue.push(cur.word);          // 跳过的词排到最后，等会儿再来
+  showPraise('⏭ 先跳过，等会儿再来', true);
+  els.card.classList.add('sink');
+  updateHud();
+  state.nextTimer = setTimeout(spawnNext, MISS_DELAY_MS);
+}
+
+/* ---------- 花园 ---------- */
+function plantFlower(helped) {
+  const ground = els.garden.clientHeight || 64;
+  const flower = document.createElement('span');
+  flower.className = 'flower';
+  flower.textContent = helped ? SPROUT : pick(FLOWERS);
+  flower.style.left = `${rand(4, 96)}%`;
+  flower.style.bottom = `${rand(4, Math.max(6, ground - 36))}px`;
+  els.garden.appendChild(flower);
+  state.planted = [...state.planted, flower.textContent];
+}
+
+function renderGardenSummary() {
+  const box = $('#gardenSummary');
+  const flowers = state.planted.filter((f) => f !== SPROUT).length;
+  const sprouts = state.planted.length - flowers;
+  if (state.planted.length === 0) { box.replaceChildren(); return; }
+  const shown = state.planted.slice(0, 80).join('') + (state.planted.length > 80 ? '…' : '');
+  const text = `你的花园长出了 ${flowers} 朵花${sprouts ? `、${sprouts} 棵小芽（用了提示的词）` : ''}：`;
+  box.replaceChildren(text, Object.assign(document.createElement('span'), { className: 'flowers', textContent: shown }));
 }
 
 /* ---------- 结果 ---------- */
@@ -985,6 +1256,8 @@ function completeWord(byVoice) {
   state.combo += 1;
   state.maxCombo = Math.max(state.maxCombo, state.combo);
   state.score += 10 + Math.min(state.combo - 1, 10) * 2;
+  if (cur.helped) markHelped(cur.word);
+  plantFlower(cur.helped);
   Sound.win();
   Voice.speak(cur.word.en);
   const text = state.combo >= 3 ? `🔥 连击 ×${state.combo}` : pick(PRAISES);
@@ -1062,13 +1335,7 @@ function loop(ts) {
   const cur = state.current;
   /* 窗口太矮（或页面在后台被缩成 0 高）时先停住，避免一出现就判成“漏掉” */
   if (cur && cur.status === 'falling' && floorY() > cur.h + 20) {
-    const bottom = floorY() - cur.h;
-    cur.y += ((bottom + cur.h) / fallSeconds()) * dt;
-    cur.x = Math.min(cur.x, Math.max(16, els.stage.clientWidth - cur.w - 16));
-    if (!cur.halfSpoken && cur.y > bottom / 2) { cur.halfSpoken = true; Voice.speak(cur.word.en); }
-    placeCard();
-    if (cur.y >= bottom) missWord();
-
+    if (isRelax()) updateRelaxed(cur, dt); else updateFalling(cur, dt);
     if (settings.theme === 'shooter') {
       const target = cur.x + cur.w / 2;
       state.shooterX += (target - state.shooterX) * Math.min(1, dt * 5);
@@ -1076,6 +1343,31 @@ function loop(ts) {
     }
   }
   state.raf = requestAnimationFrame(loop);
+}
+
+/* 挑战模式：往下落，掉到底就排队再来 */
+function updateFalling(cur, dt) {
+  const bottom = floorY() - cur.h;
+  cur.y += ((bottom + cur.h) / fallSeconds()) * dt;
+  cur.x = Math.min(cur.x, Math.max(16, els.stage.clientWidth - cur.w - 16));
+  if (!cur.halfSpoken && cur.y > bottom / 2) { cur.halfSpoken = true; Voice.speak(cur.word.en); }
+  placeCard();
+  if (cur.y >= bottom) missWord();
+}
+
+/* 轻松模式：卡片浮在中间轻轻上下晃，不限时；一直没进展才逐步给提示 */
+function floatCard(cur) {
+  cur.x = Math.max(12, (els.stage.clientWidth - cur.w) / 2);
+  cur.y = Math.max(12, (floorY() - cur.h) * 0.32) + Math.sin(cur.t * 1.6) * 6;
+}
+
+function updateRelaxed(cur, dt) {
+  cur.t += dt;
+  cur.idle += dt;
+  floatCard(cur);
+  placeCard();
+  if (!cur.repeated && cur.idle >= HINT_REPEAT_AFTER) { cur.repeated = true; Voice.speak(cur.word.en); }
+  if (cur.idle >= cur.nextHintAt) revealHint();
 }
 
 function runLoop() {
@@ -1092,9 +1384,11 @@ function startRound(words, limit) {
   Object.assign(state, {
     phase: 'playing', queue: picked, roundSize: picked.length, current: null, buffer: '',
     score: 0, combo: 0, maxCombo: 0, correct: 0, misses: 0, missed: new Map(),
-    elapsed: 0, pendingSpawn: false, shooterX: els.stage.clientWidth / 2,
+    elapsed: 0, pendingSpawn: false, shooterX: els.stage.clientWidth / 2, planted: [],
   });
+  els.garden.replaceChildren();
   els.app.classList.toggle('theme-shooter', settings.theme === 'shooter');
+  els.app.classList.toggle('play-relax', isRelax());
   els.shooter.style.left = `${state.shooterX}px`;
   showOverlay(null);
   spawnNext();
@@ -1127,8 +1421,16 @@ function finishRound() {
   Voice.stop();
   els.card.classList.add('hidden');
 
+  /* 挑战：拼对率 = 拼对 / (拼对 + 掉到底)；轻松：独立拼对 = 没用提示、没跳过的词 / 本局词数 */
   const attempts = state.correct + state.misses;
-  $('#sumAcc').textContent = `${attempts ? Math.round((state.correct / attempts) * 100) : 0}%`;
+  const independent = state.roundSize - state.missed.size;
+  const ratio = isRelax()
+    ? (state.roundSize ? independent / state.roundSize : 0)
+    : (attempts ? state.correct / attempts : 0);
+  $('#sumAcc').textContent = `${Math.round(ratio * 100)}%`;
+  $('#sumAccLabel').textContent = isRelax() ? '独立拼对' : '拼对率';
+  els.perfect.textContent = isRelax() ? '全部自己拼出来了，太厉害了！' : '一个都没漏，太厉害了！';
+  renderGardenSummary();
   $('#sumCombo').textContent = state.maxCombo;
   $('#sumTime').textContent = formatTime(state.elapsed);
   $('#sumScore').textContent = state.score;
@@ -1145,7 +1447,8 @@ function finishRound() {
 function renderMissedItem({ word, count }) {
   const li = document.createElement('li');
   const en = Object.assign(document.createElement('span'), { className: 'en', textContent: word.en });
-  const zh = Object.assign(document.createElement('span'), { className: 'zh', textContent: `${word.zh}　漏了 ${count} 次` });
+  const note = isRelax() ? `用了提示 / 跳过 ${count} 次` : `漏了 ${count} 次`;
+  const zh = Object.assign(document.createElement('span'), { className: 'zh', textContent: `${word.zh}　${note}` });
   const btn = Object.assign(document.createElement('button'), { textContent: '🔊' });
   btn.addEventListener('click', () => Voice.speak(word.en));
   li.append(en, zh, btn);
@@ -1166,6 +1469,8 @@ function showMenu() {
 function fillMenu() {
   document.querySelector(`input[name=mode][value=${settings.mode}]`).checked = true;
   document.querySelector(`input[name=theme][value=${settings.theme}]`).checked = true;
+  document.querySelector(`input[name=play][value=${settings.play}]`).checked = true;
+  els.app.classList.toggle('play-relax', isRelax());
   els.perRound.value = String(settings.perRound);
   els.wordsInput.value = settings.words;
   els.wordCount.textContent = parseWords(settings.words).length;
@@ -1180,6 +1485,7 @@ function startFromMenu() {
     return;
   }
   updateSettings({
+    play: document.querySelector('input[name=play]:checked').value === 'challenge' ? 'challenge' : 'relax',
     mode: document.querySelector('input[name=mode]:checked').value === 'en' ? 'en' : 'zh',
     theme: document.querySelector('input[name=theme]:checked').value === 'shooter' ? 'shooter' : 'classic',
     perRound: PER_ROUND_OPTIONS.includes(Number(els.perRound.value)) ? Number(els.perRound.value) : DEFAULTS.perRound,
@@ -1243,6 +1549,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
     if (state.phase === 'menu') { e.preventDefault(); startFromMenu(); }
     else if (state.phase === 'summary') { e.preventDefault(); startRound(parseWords(settings.words), settings.perRound); }
+    else if (state.phase === 'playing' && isRelax()) { e.preventDefault(); revealHint(); Voice.speak(state.current.word.en); }
     return;
   }
   if (e.key === 'Escape') { if (state.phase === 'playing') pauseGame(); else if (state.phase === 'paused') resumeGame(); return; }
@@ -1261,10 +1568,24 @@ els.rateRange.addEventListener('input', () => { updateSettings({ rate: clamp(Num
   if (r === els.rateRange && state.current?.status === 'falling') Voice.speak(state.current.word.en);
 }));
 els.micBtn.addEventListener('click', () => {
-  if (Listener.on) Listener.stop(); else { Listener.start(onSpeech); toast('语音已打开：直接念出掉下来的单词'); }
-  renderMicButton();
+  hideNotice();
+  if (Listener.status === 'blocked') Listener.start(onSpeech);          // 卡住了：这次点击就是重新开启
+  else if (Listener.on) Listener.stop();
+  else Listener.start(onSpeech);
   els.micBtn.blur();
 });
+let micAnnounced = false;   // 每次开启只提示一次“正在听”，自动续上时不重复弹
+Listener.onStatusChange((s) => {
+  renderMicButton();
+  if (s === 'listening' && !micAnnounced) { micAnnounced = true; toast('正在听：念出卡片上的单词'); }
+  if (s === 'off') micAnnounced = false;
+});
+Listener.onProblem((reason, code) => showNotice(explainMicProblem(reason, code)));
+$('#noticeClose').addEventListener('click', hideNotice);
+/* 麦克风被浏览器拦住时，孩子下一次按键 / 点屏幕键盘就顺手把它重新打开 */
+['keydown', 'pointerdown'].forEach((type) => document.addEventListener(type, (e) => {
+  if (Listener.status === 'blocked' && e.target !== els.micBtn) Listener.start();
+}, true));
 els.pauseBtn.addEventListener('click', () => { els.pauseBtn.blur(); if (state.phase === 'playing') pauseGame(); else resumeGame(); });
 $('#resumeBtn').addEventListener('click', resumeGame);
 $('#endBtn').addEventListener('click', finishRound);
@@ -1281,6 +1602,16 @@ els.wordsInput.addEventListener('input', () => {
 $('#againBtn').addEventListener('click', () => startRound(parseWords(settings.words), settings.perRound));
 els.missedOnlyBtn.addEventListener('click', () => startRound([...state.missed.values()].map((m) => m.word), 0));
 $('#backBtn').addEventListener('click', showMenu);
+$('#hintBtn').addEventListener('click', (e) => {
+  e.currentTarget.blur();
+  revealHint();
+  if (state.current) Voice.speak(state.current.word.en);
+});
+$('#skipBtn').addEventListener('click', (e) => { e.currentTarget.blur(); skipWord(); });
+/* 切换玩法时顶栏立刻跟着变：轻松模式不需要“掉落速度” */
+document.querySelectorAll('input[name=play]').forEach((radio) => radio.addEventListener('change', () => {
+  els.app.classList.toggle('play-relax', radio.checked && radio.value === 'relax');
+}));
 document.addEventListener('visibilitychange', () => { if (document.hidden) pauseGame(); });
 
 /* ---------- 屏幕键盘（触屏设备） ---------- */
