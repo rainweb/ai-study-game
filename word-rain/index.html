@@ -1029,14 +1029,16 @@ const VOSK_SCRIPT_URLS = [
   'https://unpkg.com/vosk-browser@0.0.8/dist/vosk.js',
 ];
 /*
- * 模型优先用同目录 models/ 下的本地文件（拆成两半，每个约 20MB，GitHub 网页上传单个文件不能超过 25MB），
+ * 模型优先用同目录 models/ 下的本地文件（拆成 5 段，每段约 8MB，方便用 GitHub 网页上传），
  * 本地没有时再去外网下载完整的一个。
  */
+const VOSK_MODEL_PARTS = 5;
 const VOSK_MODEL_SOURCES = [
-  ['models/vosk-model-small-en-us-0.15.tar.gz.part1', 'models/vosk-model-small-en-us-0.15.tar.gz.part2'],
+  Array.from({ length: VOSK_MODEL_PARTS }, (_, i) => `models/vosk-model-small-en-us-0.15.tar.gz.part${i + 1}`),
   ['https://ccoreilly.github.io/vosk-browser/models/vosk-model-small-en-us-0.15.tar.gz'],
 ];
-const VOSK_CACHE = 'word-rain-vosk-v1';   // 模型下载一次后存进浏览器缓存，以后打开不用再下
+const VOSK_CACHE = 'word-rain-vosk-v2';   // 模型下载一次后存进浏览器缓存，以后打开不用再下
+const VOSK_MODEL_BYTES = 41184862;         // 完整模型的大小：拼出来或缓存里的不是这个大小，就说明不完整，不用它
 
 const OfflineListener = (() => {
   const AC = window.AudioContext || window.webkitAudioContext;
@@ -1120,12 +1122,15 @@ const OfflineListener = (() => {
       const urls = paths.map((p) => new URL(p, location.href).href);
       try {
         const hit = cache && await cache.match(urls[0]);
-        if (hit) return await hit.blob();
+        const cached = hit && await hit.blob();
+        if (cached?.size === VOSK_MODEL_BYTES) return cached;
+        if (cached) await cache.delete(urls[0]);
         const chunks = [];
         for (let i = 0; i < urls.length; i++) {
           chunks.push(...await download(urls[i], (f) => onProgress?.((i + f) / urls.length)));
         }
         const blob = new Blob(chunks, { type: 'application/gzip' });
+        if (blob.size !== VOSK_MODEL_BYTES) continue;   // 少了几段或文件不对：换下一个来源
         if (cache) cache.put(urls[0], new Response(blob)).catch(() => {});
         return blob;
       } catch (_) { /* 换下一个来源 */ }
