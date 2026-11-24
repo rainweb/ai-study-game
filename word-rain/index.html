@@ -312,6 +312,15 @@
           <button id="voiceTestBtn">🔊 试听</button>
           <span class="hint" id="voiceHint"></span>
         </div>
+        <div class="row">
+          <span class="label">识别方式</span>
+          <select id="asrSelect">
+            <option value="auto">自动（安卓用离线）</option>
+            <option value="browser">系统识别（在线）</option>
+            <option value="offline">离线识别</option>
+          </select>
+          <span class="hint" id="asrHint"></span>
+        </div>
         <div class="row" id="bankRow">
           <span class="label">教材</span>
           <select id="bankSelect"></select>
@@ -712,6 +721,7 @@ function loadSettings() {
     words: typeof raw.words === 'string' && raw.words.trim() ? raw.words : DEFAULTS.words,
     bank: typeof raw.bank === 'string' ? raw.bank.slice(0, 10) : '',
     units: Array.isArray(raw.units) ? raw.units.filter((u) => typeof u === 'string').slice(0, 30) : [],
+    asr: ['browser', 'offline'].includes(raw.asr) ? raw.asr : 'auto',   // 语音识别方式
     voice: typeof raw.voice === 'string' ? raw.voice.slice(0, 300) : '',   // voiceURI，空 = 自动选择
   });
 }
@@ -830,7 +840,7 @@ const Voice = (() => {
  * 浏览器的识别会话说完一句或安静几秒就会自己结束，这里负责自动续上。
  * 状态：off（关）/ starting（连接中）/ listening（正在听）/ blocked（浏览器不让自动重开，需要点一下或按一下键）
  */
-const Listener = (() => {
+const BrowserListener = (() => {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   const MAX_RETRIES = 6;
   const START_TIMEOUT_MS = 8000;   // 点了开启却一直连不上（安卓 Chrome 连不到 Google 时常见）
@@ -844,6 +854,11 @@ const Listener = (() => {
   let startTimer = 0;
   let fromGesture = false;   // 这次开启是不是用户亲手点的（浏览器对“自动重开”更严格）
   let everListened = false;  // 这次开启后有没有真正开始听过
+  const QUICK_END_MS = 1000;
+  const MAX_QUICK_ENDS = 3;
+  let sessionStartedAt = 0;
+  let heardAudio = false;    // 这一段会话里麦克风有没有真正开始收音
+  let quickEnds = 0;         // 连续“刚开就结束”的次数
 
   const setStatus = (s) => { status = s; onStatus?.(s); };
 
@@ -878,9 +893,12 @@ const Listener = (() => {
       retries = 0;
       fromGesture = false;
       everListened = true;
+      sessionStartedAt = performance.now();
+      heardAudio = false;
       clearTimeout(startTimer);
       setStatus('listening');
     };
+    rec.onaudiostart = () => { heardAudio = true; quickEnds = 0; };
     rec.onresult = (e) => {
       for (let i = e.resultIndex; i < e.results.length; i++) {
         for (let j = 0; j < e.results[i].length; j++) onText?.(e.results[i][j].transcript);
@@ -907,7 +925,16 @@ const Listener = (() => {
     };
     /* 自动续上时界面保持“正在听”，不来回闪“连接中”（只有第一次开启才显示连接中） */
     rec.onend = () => {
-      if (status === 'listening' || status === 'starting') retryTimer = setTimeout(tryStart, 150);
+      if (status !== 'listening' && status !== 'starting') return;
+      /*
+       * 刚开就结束、麦克风一次都没打开过：通常是系统里根本没有可用的识别服务
+       * （比如安卓没装 Google App，日志里是 "no selected voice recognition service"）。
+       * 连续 3 次这样就判定用不了，不再无限重试。
+       */
+      const quick = performance.now() - sessionStartedAt < QUICK_END_MS && !heardAudio;
+      quickEnds = quick ? quickEnds + 1 : 0;
+      if (quickEnds >= MAX_QUICK_ENDS) { fail('service', 'aborted'); return; }
+      retryTimer = setTimeout(tryStart, 150);
     };
   }
 
@@ -926,6 +953,7 @@ const Listener = (() => {
       if (status === 'off') everListened = false;
       fromGesture = true;
       retries = 0;
+      quickEnds = 0;
       setStatus('starting');
       clearTimeout(startTimer);
       startTimer = setTimeout(() => { if (status === 'starting' && !everListened) fail('timeout'); }, START_TIMEOUT_MS);
@@ -937,6 +965,254 @@ const Listener = (() => {
       setStatus('off');
       if (rec) try { rec.abort(); } catch (_) {}
     },
+  };
+})();
+
+/* ---------- 离线语音识别（Vosk：在手机 / 电脑本地识别，不依赖 Google，不用联网） ---------- */
+/* 引擎和模型只在第一次用离线识别时才加载；和 index.html 放在一起的本地文件优先，找不到再用网上的 */
+const VOSK_SCRIPT_URLS = [
+  'vosk.js',
+  'https://cdn.jsdelivr.net/npm/vosk-browser@0.0.8/dist/vosk.js',
+  'https://unpkg.com/vosk-browser@0.0.8/dist/vosk.js',
+];
+const VOSK_MODEL_URLS = [
+  'models/vosk-model-small-en-us-0.15.tar.gz',
+  'https://ccoreilly.github.io/vosk-browser/models/vosk-model-small-en-us-0.15.tar.gz',
+];
+const VOSK_CACHE = 'word-rain-vosk-v1';   // 模型下载一次后存进浏览器缓存，以后打开不用再下
+
+const OfflineListener = (() => {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const supported = Boolean(window.WebAssembly && window.Worker && AC && navigator.mediaDevices?.getUserMedia);
+  let status = 'off';
+  let onText = null;
+  let onStatus = null;
+  let onProblem = null;
+  let onProgress = null;
+  let modelPromise = null;
+  let model = null;
+  let recognizer = null;
+  let ctx = null;
+  let stream = null;
+  let source = null;
+  let processor = null;
+  let sink = null;
+  let vocabulary = [];
+  let session = 0;   // 每次开启的编号：中途被关掉时，还在进行的加载就不再接着开麦克风
+
+  const setStatus = (s) => { status = s; onStatus?.(s); };
+  const failWith = (reason) => Object.assign(new Error(reason), { reason });
+
+  function loadScript(url) {
+    return new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = url;
+      s.async = true;
+      s.onload = resolve;
+      s.onerror = () => { s.remove(); reject(new Error(url)); };
+      document.head.appendChild(s);
+    });
+  }
+
+  async function ensureLibrary() {
+    if (window.Vosk) return;
+    for (const url of VOSK_SCRIPT_URLS) {
+      try { await loadScript(url); if (window.Vosk) return; } catch (_) { /* 换下一个地址 */ }
+    }
+    throw failWith('offline-lib');
+  }
+
+  /* 边下载边报进度；下载完存进缓存 */
+  async function fetchModelBlob() {
+    const cache = window.caches ? await caches.open(VOSK_CACHE).catch(() => null) : null;
+    for (const path of VOSK_MODEL_URLS) {
+      const url = new URL(path, location.href).href;
+      try {
+        const hit = cache && await cache.match(url);
+        if (hit) return await hit.blob();
+        const res = await fetch(url);
+        if (!res.ok || !res.body) continue;
+        const total = Number(res.headers.get('content-length')) || 0;
+        const reader = res.body.getReader();
+        const chunks = [];
+        let received = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          received += value.length;
+          onProgress?.(total ? received / total : 0);
+        }
+        const blob = new Blob(chunks, { type: 'application/gzip' });
+        if (cache) cache.put(url, new Response(blob)).catch(() => {});
+        return blob;
+      } catch (_) { /* 换下一个地址 */ }
+    }
+    throw failWith('offline-model');
+  }
+
+  function ensureModel() {
+    if (!modelPromise) {
+      modelPromise = (async () => {
+        await ensureLibrary();
+        const blobUrl = URL.createObjectURL(await fetchModelBlob());
+        try {
+          const loaded = await window.Vosk.createModel(blobUrl);
+          if (!loaded.ready) throw failWith('offline-model');
+          return loaded;
+        } finally {
+          URL.revokeObjectURL(blobUrl);
+        }
+      })().catch((e) => { modelPromise = null; throw e.reason ? e : failWith('offline-model'); });
+    }
+    return modelPromise;
+  }
+
+  /*
+   * 限定词表 = 本局单词 + 干扰词（全部教材单词 + 日常常用词）+ [unk]。
+   * 只放本局几个词的话，孩子说别的话也会被硬凑成其中一个；有了干扰词，别的话会被认成别的词，
+   * 而只有卡片上的那个词才算对，所以干扰词越多越不容易误判。
+   */
+  const FILLER_WORDS = ('hello hi bye goodbye good morning afternoon evening night yes no okay ok please thank thanks sorry ' +
+    'i you he she it we they me my your this that what where who how why when is are am was do does can not ' +
+    'a an the and or but to of in on at for with go come look see say like want have has get let one two three ' +
+    'mum mummy dad daddy teacher what\'s it\'s i\'m don\'t um uh oh wow').split(' ');
+  const normalizePhrase = (w) => w.toLowerCase().replace(/[^a-z' ]/g, ' ').replace(/\s+/g, ' ').trim();
+  let distractors = null;
+  function getDistractors() {
+    if (!distractors) {
+      const bankWords = (window.WORD_BANKS || []).flatMap((b) => b.units.flatMap((u) => u.words));
+      distractors = [...parseWords(bankWords.join('\n')).map((w) => w.en), ...FILLER_WORDS];
+    }
+    return distractors;
+  }
+  function grammar() {
+    if (!vocabulary.length) return undefined;   // 不在一局里时不限定
+    const phrases = [...vocabulary, ...getDistractors()].map(normalizePhrase).filter(Boolean);
+    return JSON.stringify([...new Set(phrases), '[unk]']);
+  }
+
+  /*
+   * 防误判（限定词表时，乱说的话也可能被凑成某个词）：
+   * - 中途结果：同一个结果连续出现两次才算，避免一闪而过的猜测
+   * - 最终结果：只保留把握度（置信度）够高的词
+   */
+  const MIN_WORD_CONF = 0.6;
+  function makeRecognizer() {
+    try { recognizer?.remove(); } catch (_) {}
+    let lastPartial = '';
+    recognizer = new model.KaldiRecognizer(ctx.sampleRate, grammar());
+    recognizer.setWords(true);
+    recognizer.on('result', (m) => {
+      lastPartial = '';
+      const words = m.result?.result || [];
+      const text = words.filter((w) => w.word !== '[unk]' && (w.conf ?? 1) >= MIN_WORD_CONF).map((w) => w.word).join(' ');
+      if (text) onText?.(text);
+    });
+    recognizer.on('partialresult', (m) => {
+      const partial = (m.result?.partial || '').replace(/\[unk\]/g, '').trim();
+      if (partial && partial === lastPartial) onText?.(partial);
+      lastPartial = partial;
+    });
+  }
+
+  function cleanup() {
+    if (processor) { processor.onaudioprocess = null; try { processor.disconnect(); } catch (_) {} }
+    try { source?.disconnect(); sink?.disconnect(); } catch (_) {}
+    stream?.getTracks().forEach((t) => t.stop());
+    try { recognizer?.remove(); } catch (_) {}
+    ctx?.close().catch(() => {});
+    processor = null; source = null; sink = null; stream = null; recognizer = null; ctx = null;
+  }
+
+  async function start(cb) {
+    if (cb) onText = cb;
+    if (!supported) { onProblem?.('offline-unsupported', ''); return; }
+    if (!window.isSecureContext || location.protocol === 'file:') { onProblem?.('offline-file', ''); return; }
+    if (status === 'starting' || status === 'listening') return;
+    const mySession = ++session;
+    setStatus('starting');
+    ctx = new AC();   // 要在点击时创建，手机浏览器才允许使用音频
+    try {
+      const mic = navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
+      mic.catch(() => {});   // 避免下载失败时出现未处理的 Promise 报错
+      const [micStream, loadedModel] = await Promise.all([mic, ensureModel()]);
+      stream = micStream;
+      model = loadedModel;
+      if (mySession !== session) { cleanup(); return; }
+      await ctx.resume();
+      source = ctx.createMediaStreamSource(stream);
+      processor = ctx.createScriptProcessor(4096, 1, 1);
+      sink = ctx.createGain();
+      sink.gain.value = 0;   // 处理节点要接到输出才会工作，音量设 0 免得把麦克风的声音放出来
+      makeRecognizer();
+      processor.onaudioprocess = (e) => {
+        if (Voice.isEchoTime()) return;   // 游戏自己在朗读：不把喇叭里的声音送去识别
+        try { recognizer?.acceptWaveform(e.inputBuffer); } catch (_) {}
+      };
+      source.connect(processor);
+      processor.connect(sink);
+      sink.connect(ctx.destination);
+      setStatus('listening');
+    } catch (e) {
+      if (mySession !== session) return;
+      cleanup();
+      setStatus('off');
+      const reason = e.reason
+        || (['NotAllowedError', 'SecurityError'].includes(e.name) ? 'permission'
+          : ['NotFoundError', 'NotReadableError'].includes(e.name) ? 'nomic' : 'unknown');
+      onProblem?.(reason, e.name || e.message);
+    }
+  }
+
+  return {
+    supported,
+    get on() { return status !== 'off'; },
+    get status() { return status; },
+    onStatusChange(cb) { onStatus = cb; },
+    onProblem(cb) { onProblem = cb; },
+    onProgress(cb) { onProgress = cb; },
+    start,
+    stop() { session++; cleanup(); setStatus('off'); },
+    /* 换了一局单词：正在听的话就换一个新词表的识别器 */
+    setVocabulary(words) {
+      vocabulary = [...words];
+      if (status === 'listening' && model && ctx) makeRecognizer();
+    },
+  };
+})();
+
+/*
+ * 统一入口：按设置选识别方式。
+ * 自动：安卓用离线（国内安卓 Chrome 大多用不了 Google 识别）；iPhone、电脑用系统识别，浏览器不支持时也用离线。
+ */
+const Listener = (() => {
+  const engines = { browser: BrowserListener, offline: OfflineListener };
+  let active = null;
+  const pick = () => {
+    if (settings.asr === 'browser' || settings.asr === 'offline') return settings.asr;
+    if (DEVICE.android) return 'offline';
+    return BrowserListener.supported ? 'browser' : 'offline';
+  };
+  const current = () => engines[active || pick()];
+  return {
+    get supported() { return current().supported; },
+    get on() { return current().on; },
+    get status() { return current().status; },
+    get engine() { return active || pick(); },
+    onStatusChange(cb) { Object.values(engines).forEach((e) => e.onStatusChange(cb)); },
+    onProblem(cb) { Object.values(engines).forEach((e) => e.onProblem(cb)); },
+    onProgress(cb) { OfflineListener.onProgress(cb); },
+    start(cb) {
+      const name = pick();
+      if (active && active !== name) engines[active].stop();
+      active = name;
+      engines[name].start(cb);
+    },
+    stop() { if (active) engines[active].stop(); },
+    /* 切换了识别方式：先关掉正在用的，下次开启用新的 */
+    reset() { if (active) engines[active].stop(); active = null; },
+    setVocabulary(words) { OfflineListener.setVocabulary(words); },
   };
 })();
 
@@ -1016,16 +1292,22 @@ function explainMicProblem(reason, code) {
     return `这个浏览器不支持语音识别，可以换 Chrome、Edge 或 Safari。${TYPE_INSTEAD}`;
   }
   if (reason === 'insecure') return `语音识别需要用 https 网址打开（比如 GitHub 上的地址），本地文件或 http 网址用不了麦克风。${TYPE_INSTEAD}`;
+  if (reason === 'offline-file') return `离线识别需要用网址打开（比如 GitHub 上的地址），双击本地文件打开时浏览器不允许加载语音模型。${TYPE_INSTEAD}`;
+  if (reason === 'offline-unsupported') return `这个浏览器太旧，不支持离线识别，请换最新版的 Chrome、Edge 或 Safari。${TYPE_INSTEAD}`;
+  if (reason === 'offline-lib') return `离线识别引擎加载失败，请检查网络后再点 🎤（只有第一次需要联网下载）。${TYPE_INSTEAD}`;
+  if (reason === 'offline-model') return `离线语音模型下载失败（约 40MB），请换个网络再点 🎤；下载成功一次后就不用再下了。${TYPE_INSTEAD}`;
   if (reason === 'permission') {
     if (DEVICE.ios) return '没有拿到麦克风权限：请在「设置 › Safari › 麦克风」里选「允许」，然后再点 🎤。';
     if (DEVICE.android) return '没有拿到麦克风权限：点地址栏左边的图标允许麦克风；手机「设置 › 应用 › Chrome › 权限」里也要打开麦克风。';
     return '没有拿到麦克风权限：点地址栏左边的图标，允许这个网页使用麦克风，然后再点 🎤。';
   }
   if (reason === 'service' && DEVICE.ios) return '语音识别没打开：请在「设置 › 通用 › 键盘」里打开「启用听写」，然后再点 🎤。';
+  const TRY_OFFLINE = '可以在开始界面把「识别方式」改成「离线识别」，不依赖 Google。';
+  if (reason === 'service' && DEVICE.android) return `这台安卓手机没有可用的系统语音识别服务。${TRY_OFFLINE}`;
   if (['service', 'network', 'timeout'].includes(reason)) {
-    if (DEVICE.android) return `这台安卓手机用不了语音识别：安卓 Chrome 的语音识别要用 Google 的服务，国内一般连不上。可以换 iPhone / iPad 玩语音。${TYPE_INSTEAD}`;
+    if (DEVICE.android) return `这台安卓手机用不了系统语音识别：它要用 Google 的服务，国内一般连不上。${TRY_OFFLINE}`;
     if (DEVICE.ios) return `语音识别连不上，请检查网络后再点 🎤。${TYPE_INSTEAD}`;
-    return `语音识别连不上：电脑上的 Chrome / Edge 要连接 Google 或微软的服务器，当前网络访问不了。${TYPE_INSTEAD}`;
+    return `语音识别连不上：电脑上的 Chrome / Edge 要连接 Google 或微软的服务器，当前网络访问不了。${TRY_OFFLINE}`;
   }
   if (reason === 'nomic') return `没找到麦克风，请检查是否插好或被其他程序占用。${TYPE_INSTEAD}`;
   if (reason === 'language') return `这个浏览器不支持英语语音识别。${TYPE_INSTEAD}`;
@@ -1389,6 +1671,7 @@ function startRound(words, limit) {
     elapsed: 0, pendingSpawn: false, shooterX: els.stage.clientWidth / 2, planted: [],
   });
   els.garden.replaceChildren();
+  Listener.setVocabulary(picked.map((w) => w.en));   // 离线识别只在本局单词里挑
   els.app.classList.toggle('theme-shooter', settings.theme === 'shooter');
   els.app.classList.toggle('play-relax', isRelax());
   els.shooter.style.left = `${state.shooterX}px`;
@@ -1473,6 +1756,8 @@ function fillMenu() {
   document.querySelector(`input[name=theme][value=${settings.theme}]`).checked = true;
   document.querySelector(`input[name=play][value=${settings.play}]`).checked = true;
   els.app.classList.toggle('play-relax', isRelax());
+  $('#asrSelect').value = settings.asr;
+  renderAsrHint();
   els.perRound.value = String(settings.perRound);
   els.wordsInput.value = settings.words;
   els.wordCount.textContent = parseWords(settings.words).length;
@@ -1585,11 +1870,42 @@ Listener.onStatusChange((s) => {
   if (s === 'starting' && micPrevStatus !== 'off') micRenderTimer = setTimeout(renderMicButton, 600);
   else renderMicButton();
   micPrevStatus = s;
-  if (s === 'listening' && !micAnnounced) { micAnnounced = true; toast('正在听：念出卡片上的单词'); }
+  if (s === 'listening' && !micAnnounced) {
+    micAnnounced = true;
+    toast(`正在听（${Listener.engine === 'offline' ? '离线' : '系统'}识别）：念出卡片上的单词`);
+  }
+  if (s === 'listening' && modelDownloadShown) { modelDownloadShown = false; hideNotice(); }
   if (s === 'off') micAnnounced = false;
 });
-Listener.onProblem((reason, code) => showNotice(explainMicProblem(reason, code)));
+Listener.onProblem((reason, code) => { modelDownloadShown = false; showNotice(explainMicProblem(reason, code)); });
 $('#noticeClose').addEventListener('click', hideNotice);
+
+/* 离线模型第一次下载：按钮上显示百分比，顶部说明只需要下载一次 */
+let modelDownloadShown = false;
+let lastProgressPct = -1;
+Listener.onProgress((ratio) => {
+  const pct = Math.floor(ratio * 100);
+  if (pct === lastProgressPct || Listener.status !== 'starting') return;
+  lastProgressPct = pct;
+  els.micBtn.textContent = `🎤 ${pct}%`;
+  modelDownloadShown = true;
+  showNotice(`第一次使用离线识别，正在下载语音模型（约 40MB，只需下载一次）：${pct}%`);
+});
+
+/* 识别方式 */
+function renderAsrHint() {
+  const engine = Listener.engine;
+  $('#asrHint').textContent = engine === 'offline'
+    ? '当前：离线识别（第一次要下载约 40MB 模型，之后不用联网）'
+    : '当前：系统识别（iPhone、电脑效果好；安卓要能连上 Google）';
+}
+$('#asrSelect').addEventListener('change', (e) => {
+  const value = ['browser', 'offline'].includes(e.target.value) ? e.target.value : 'auto';
+  updateSettings({ asr: value });
+  Listener.reset();   // 正在听的话先关掉，下次点 🎤 用新的方式
+  lastProgressPct = -1;
+  renderAsrHint();
+});
 /* 麦克风被浏览器拦住时，孩子下一次按键 / 点屏幕键盘就顺手把它重新打开（最多 1.5 秒试一次，连续按键不会反复触发） */
 let lastBlockedRetry = 0;
 ['keydown', 'pointerdown'].forEach((type) => document.addEventListener(type, (e) => {
